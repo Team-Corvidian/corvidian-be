@@ -1,0 +1,8 @@
+django
+django-ckeditor
+pillow
+psycopg2-binary 
+dj-database-url
+dotenv
+djangorestframework
+django-cors-headers
