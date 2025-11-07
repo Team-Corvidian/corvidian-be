@@ -1,4 +1,7 @@
 from django.contrib import admin, messages
+from django.core.mail import EmailMultiAlternatives
+from django.conf import settings
+from django.utils.html import strip_tags
 from .models import (
     Article,
     ConsultationLead,
@@ -36,12 +39,55 @@ class NewsletterWelcomeMessageAdmin(admin.ModelAdmin):
     list_filter = ("is_active",)
     search_fields = ("subject", "body")
     readonly_fields = ("updated_at",)
+    actions = ["send_test_email"]
+    
     fieldsets = (
         (None, {"fields": ("subject", "is_active")}),
         ("Content", {"fields": ("body",)}),
         ("Media", {"fields": ("hero_image",)}),
         ("Metadata", {"fields": ("updated_at",)})
     )
+
+    @admin.action(description="Send test email to yourself")
+    def send_test_email(self, request, queryset):
+        admin_email = request.user.email
+        if not admin_email:
+            self.message_user(
+                request,
+                "Your admin account doesn't have an email address.",
+                level=messages.ERROR,
+            )
+            return
+
+        sent_count = 0
+        for msg in queryset:
+            try:
+                html_body = msg.build_html_body(request)
+                plain_body = msg.build_plain_body() or strip_tags(html_body or "")
+
+                email = EmailMultiAlternatives(
+                    f"{msg.subject}",
+                    plain_body,
+                    settings.DEFAULT_FROM_EMAIL,
+                    [admin_email],
+                )
+                if html_body:
+                    email.attach_alternative(html_body, "text/html")
+                email.send()
+                sent_count += 1
+            except Exception as e:
+                self.message_user(
+                    request,
+                    f"Failed to send '{msg.subject}': {str(e)}",
+                    level=messages.ERROR,
+                )
+
+        if sent_count > 0:
+            self.message_user(
+                request,
+                f"Sent {sent_count} test email(s) to {admin_email}",
+                level=messages.SUCCESS,
+            )
 
 
 @admin.register(NewsletterCampaign)
@@ -50,7 +96,7 @@ class NewsletterCampaignAdmin(admin.ModelAdmin):
     list_filter = ("is_sent", "created_at")
     search_fields = ("subject", "body")
     readonly_fields = ("sent_at", "created_at", "updated_at")
-    actions = ["send_campaign"]
+    actions = ["send_campaign", "send_test_email"]
     
     fieldsets = (
         (None, {"fields": ("subject", "is_sent", "scheduled_for")}),
@@ -58,6 +104,47 @@ class NewsletterCampaignAdmin(admin.ModelAdmin):
         ("Media", {"fields": ("hero_image",)}),
         ("Delivery", {"fields": ("sent_at", "created_at", "updated_at")}),
     )
+
+    @admin.action(description="Send test email to yourself")
+    def send_test_email(self, request, queryset):
+        admin_email = request.user.email
+        if not admin_email:
+            self.message_user(
+                request,
+                "Your admin account doesn't have an email address.",
+                level=messages.ERROR,
+            )
+            return
+
+        sent_count = 0
+        for campaign in queryset:
+            try:
+                html_body = campaign.build_html_body(request)
+                plain_body = campaign.build_plain_body() or strip_tags(html_body or "")
+
+                email = EmailMultiAlternatives(
+                    f"{campaign.subject}",
+                    plain_body,
+                    settings.DEFAULT_FROM_EMAIL,
+                    [admin_email],
+                )
+                if html_body:
+                    email.attach_alternative(html_body, "text/html")
+                email.send()
+                sent_count += 1
+            except Exception as e:
+                self.message_user(
+                    request,
+                    f"Failed to send '{campaign.subject}': {str(e)}",
+                    level=messages.ERROR,
+                )
+
+        if sent_count > 0:
+            self.message_user(
+                request,
+                f"Sent {sent_count} test email(s) to {admin_email}",
+                level=messages.SUCCESS,
+            )
 
     @admin.action(description="Send selected campaigns to all subscribers")
     def send_campaign(self, request, queryset):
