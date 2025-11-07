@@ -1,16 +1,18 @@
 from rest_framework import viewsets, generics
 from rest_framework.response import Response
 from rest_framework import status
-from .models import Article, ConsultationLead, NewsletterSubscriber
+from .models import Article, ConsultationLead, NewsletterSubscriber, NewsletterWelcomeMessage
 from .serializers import ArticleSerializer
 from rest_framework.views import APIView
-from django.core.mail import send_mail
+from django.core.mail import send_mail, EmailMultiAlternatives
 from django.conf import settings
 import urllib.parse
+
 
 class ArticleViewSet(viewsets.ModelViewSet):
     queryset = Article.objects.all().order_by('-published_at')
     serializer_class = ArticleSerializer
+
 
 class ArticleDetailBySlugView(generics.RetrieveAPIView):
     queryset = Article.objects.all()
@@ -24,6 +26,7 @@ class ArticleDetailBySlugView(generics.RetrieveAPIView):
             return Response(serializer.data)
         except Article.DoesNotExist:
             return Response({"detail": "Article not found"}, status=status.HTTP_404_NOT_FOUND)
+
 
 class ConsultationSubmitView(APIView):
     def post(self, request):
@@ -80,22 +83,6 @@ class ConsultationSubmitView(APIView):
             "whatsapp_url": wa_url,
         })
 
-class NewsletterSubscribeView(APIView):
-    def post(self, request):
-        email = request.data.get("email")
-
-        if not email:
-            return Response({"error": "Email required"}, status=400)
-
-        send_mail(
-            "New Newsletter Subscriber",
-            f"New subscriber: {email}",
-            settings.DEFAULT_FROM_EMAIL,
-            [settings.CONSULTATION_RECEIVER_EMAIL],  
-        )
-
-        return Response({"success": True})
-    
 
 class NewsletterSubscribeView(APIView):
     def post(self, request):
@@ -104,19 +91,57 @@ class NewsletterSubscribeView(APIView):
         if not email:
             return Response({"error": "Email is required"}, status=400)
 
-        obj, created = NewsletterSubscriber.objects.get_or_create(email=email, defaults={"source": source})
+        obj, created = NewsletterSubscriber.objects.get_or_create(
+            email=email, 
+            defaults={"source": source}
+        )
 
         admin_subject = "New Newsletter Subscriber"
         admin_message = f"Email: {email}\nSource: {source}"
-        send_mail(admin_subject, admin_message, settings.DEFAULT_FROM_EMAIL, [settings.CONSULTATION_RECEIVER_EMAIL], fail_silently=False)
+        send_mail(
+            admin_subject, 
+            admin_message, 
+            settings.DEFAULT_FROM_EMAIL, 
+            [settings.CONSULTATION_RECEIVER_EMAIL], 
+            fail_silently=False
+        )
 
-        user_subject = "Terima kasih sudah subscribe Corvidian"
-        user_message = (
+        fallback_subject = "Terima kasih sudah subscribe Corvidian"
+        fallback_message = (
             "Hi!\n\n"
             "Terima kasih sudah berlangganan newsletter Corvidian.\n"
             "Kami akan kirim insight seputar teknologi, automasi, dan transformasi digital.\n\n"
             "Salam,\nCorvidian Team\nwww.corvidian.io"
         )
-        send_mail(user_subject, user_message, settings.DEFAULT_FROM_EMAIL, [email], fail_silently=False)
+
+        active_message = (
+            NewsletterWelcomeMessage.objects.filter(is_active=True)
+            .order_by("-updated_at")
+            .first()
+        )
+
+        if active_message:
+            user_subject = active_message.subject
+            plain_body = active_message.build_plain_body()
+            user_message = plain_body or fallback_message
+            html_body = active_message.build_html_body(request)
+            
+            message = EmailMultiAlternatives(
+                user_subject,
+                user_message,
+                settings.DEFAULT_FROM_EMAIL,
+                [email],
+            )
+            if html_body:
+                message.attach_alternative(html_body, "text/html")
+            message.send(fail_silently=False)
+        else:
+            send_mail(
+                fallback_subject,
+                fallback_message,
+                settings.DEFAULT_FROM_EMAIL,
+                [email],
+                fail_silently=False,
+            )
 
         return Response({"success": True, "created": created}, status=200)
