@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'ckeditor',
+    'ckeditor_uploader',
     'corsheaders',
     'rest_framework',
     'main',
@@ -146,4 +147,26 @@ DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 CONSULTATION_RECEIVER_EMAIL = os.getenv("CONSULTATION_RECEIVER_EMAIL")
 CONSULTATION_WHATSAPP = os.getenv("CONSULTATION_WHATSAPP")
 
+CKEDITOR_UPLOAD_PATH = 'newsletter/uploads/'
+CKEDITOR_IMAGE_BACKEND = 'pillow'
+CKEDITOR_JQUERY_URL = 'https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js'
+CKEDITOR_ALLOW_NONIMAGE_FILES = False
+CKEDITOR_RESTRICT_BY_USER = False
+CKEDITOR_BROWSE_SHOW_DIRS = True
+
+CKEDITOR_CONFIGS = {
+    'default': {
+        'toolbar': 'Custom',
+        'toolbar_Custom': [
+            ['Bold', 'Italic', 'Underline'],
+            ['NumberedList', 'BulletedList', '-', 'Outdent', 'Indent'],
+            ['Link', 'Unlink'],
+            ['Image', 'Table'],
+            ['RemoveFormat', 'Source']
+        ],
+        'height': 400,
+        'width': '100%',
+        'filebrowserUploadMethod': 'form',
+    },
+}
 
