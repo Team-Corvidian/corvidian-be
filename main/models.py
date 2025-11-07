@@ -5,10 +5,12 @@ from django.db import models
 from django.utils import timezone
 from django.utils.html import escape, strip_tags
 from django.utils.text import slugify
-from ckeditor.fields import RichTextField
+from ckeditor_uploader.fields import RichTextUploadingField
 from PIL import Image
 from bs4 import BeautifulSoup
 import io
+import base64
+import os
 
 
 class Article(models.Model):
@@ -17,7 +19,7 @@ class Article(models.Model):
     author = models.CharField(max_length=100)
     published_at = models.DateField()
     cover_image = models.ImageField(upload_to='wawasan/covers/', blank=True, null=True)
-    content = RichTextField()
+    content = RichTextUploadingField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -53,18 +55,18 @@ class NewsletterSubscriber(models.Model):
 
 class NewsletterContent(models.Model):
     subject = models.CharField(max_length=255)
-    body = RichTextField(blank=True, null=True)
+    body = RichTextUploadingField(blank=True, null=True)
     hero_image = models.ImageField(upload_to="newsletter/messages/", blank=True, null=True)
 
     class Meta:
         abstract = True
 
     def save(self, *args, **kwargs):
-        if self.hero_image:
+        if self.hero_image and hasattr(self.hero_image, 'file'):
             try:
                 if self.pk:
                     old_instance = self.__class__.objects.filter(pk=self.pk).first()
-                    if old_instance and old_instance.hero_image != self.hero_image:
+                    if not old_instance or old_instance.hero_image != self.hero_image:
                         self.hero_image = self._compress_image(self.hero_image)
                 else:
                     self.hero_image = self._compress_image(self.hero_image)
@@ -85,14 +87,14 @@ class NewsletterContent(models.Model):
                     background.paste(img)
                 img = background
             
-            max_width = 800
+            max_width = 600
             if img.width > max_width:
                 ratio = max_width / img.width
                 new_height = int(img.height * ratio)
                 img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
             
             output = io.BytesIO()
-            img.save(output, format='JPEG', quality=85, optimize=True)
+            img.save(output, format='JPEG', quality=70, optimize=True)
             output.seek(0)
             
             original_name = image_field.name
@@ -101,83 +103,112 @@ class NewsletterContent(models.Model):
             
             return ContentFile(output.read(), name=new_name)
         except Exception as e:
-            print(f"Error in _compress_image: {e}")
+            print(f"Error compressing image: {e}")
             return image_field
 
-    def _process_inline_images(self, html_content, request=None):
-        try:
-            soup = BeautifulSoup(html_content, 'html.parser')
-            
-            for img in soup.find_all('img'):
-                if request and img.get('src') and not img['src'].startswith('http'):
-                    img['src'] = request.build_absolute_uri(img['src'])
-                
-                img['style'] = (
-                    'display:block;max-width:100%;width:auto;height:auto;'
-                    'border:0;outline:none;text-decoration:none;margin:10px 0;'
-                )
-                
-                if img.get('width'):
-                    del img['width']
-                if img.get('height'):
-                    del img['height']
-            
-            return str(soup)
-        except Exception as e:
-            print(f"Error processing inline images: {e}")
-            return html_content
-
     def build_html_body(self, request=None):
+        print("\nBuilding email HTML")
+        
+        site_url = getattr(settings, 'SITE_URL', 'http://localhost:8000')
+        is_localhost = 'localhost' in site_url or '127.0.0.1' in site_url
+        
+        print(f"Site URL: {site_url}")
+        print(f"Is localhost: {is_localhost}")
+        
         content_html = self.body or ""
         
         if content_html:
-            content_html = self._process_inline_images(content_html, request)
+            try:
+                soup = BeautifulSoup(content_html, 'html.parser')
+                images = soup.find_all('img')
+                print(f"Found {len(images)} images in body")
+                
+                for idx, img in enumerate(images, 1):
+                    src = img.get('src', '')
+                    print(f"\nBody Image {idx}: {src[:80]}")
+                    
+                    if src.startswith('data:'):
+                        print("Already base64")
+                        continue
+                    
+                    if is_localhost:
+                        try:
+                            file_path = src.replace('/media/', '').replace('media/', '').lstrip('/')
+                            full_path = os.path.join(settings.MEDIA_ROOT, file_path)
+                            
+                            print(f"Full path: {full_path}")
+                            print(f"Exists: {os.path.exists(full_path)}")
+                            
+                            if os.path.exists(full_path):
+                                with open(full_path, 'rb') as f:
+                                    img_data = f.read()
+                                    base64_data = base64.b64encode(img_data).decode()
+                                    
+                                    if full_path.lower().endswith('.png'):
+                                        mime = 'image/png'
+                                    elif full_path.lower().endswith('.gif'):
+                                        mime = 'image/gif'
+                                    else:
+                                        mime = 'image/jpeg'
+                                    
+                                    img['src'] = f"data:{mime};base64,{base64_data}"
+                                    print(f"Converted to base64 ({len(base64_data)} chars)")
+                            else:
+                                print("File not found")
+                        except Exception as e:
+                            print(f"Error: {e}")
+                    else:
+                        if not src.startswith('http'):
+                            img['src'] = f"{site_url}/{src.lstrip('/')}"
+                        print(f"Using URL: {img['src']}")
+                    
+                    img['style'] = 'display:block;max-width:100%;width:auto;height:auto;border:0;outline:none;text-decoration:none;margin:10px 0;'
+                    
+                    if img.get('width'):
+                        del img['width']
+                    if img.get('height'):
+                        del img['height']
+                
+                content_html = str(soup)
+            except Exception as e:
+                print(f"Error processing body: {e}")
 
         hero_markup = ""
         if self.hero_image:
-            image_url = self.hero_image.url
-            if request:
-                image_url = request.build_absolute_uri(image_url)
+            print("\nProcessing hero image")
             
-            hero_markup = (
-                f'<div style="margin:0 0 20px 0;padding:0;">'
-                f'<img src="{image_url}" alt="{escape(self.subject)}" '
-                f'style="display:block;max-width:100%;width:100%;height:auto;'
-                f'border:0;outline:none;text-decoration:none;border-radius:8px;" />'
-                f'</div>'
-            )
+            try:
+                hero_path = self.hero_image.path
+                print(f"Hero path: {hero_path}")
+                print(f"Exists: {os.path.exists(hero_path)}")
+                
+                if os.path.exists(hero_path):
+                    file_size = os.path.getsize(hero_path)
+                    print(f"Size: {file_size} bytes ({file_size/1024:.1f} KB)")
+                
+                if is_localhost and os.path.exists(hero_path):
+                    with open(hero_path, 'rb') as f:
+                        img_data = f.read()
+                        base64_data = base64.b64encode(img_data).decode()
+                        image_url = f"data:image/jpeg;base64,{base64_data}"
+                        print(f"Hero converted to base64 ({len(base64_data)} chars)")
+                else:
+                    image_url = f"{site_url}{self.hero_image.url}"
+                    print(f"Using URL: {image_url}")
+                
+                hero_markup = f'<div style="margin:0 0 20px 0;padding:0;"><img src="{image_url}" alt="{escape(self.subject)}" style="display:block;max-width:100%;width:100%;height:auto;border:0;outline:none;text-decoration:none;border-radius:8px;" /></div>'
+                
+            except Exception as e:
+                print(f"Error with hero: {e}")
 
         body_content = f"{hero_markup}{content_html}" if hero_markup or content_html else ""
         
-        return f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{escape(self.subject)}</title>
-</head>
-<body style="margin:0;padding:0;background-color:#f4f4f4;font-family:Arial,sans-serif;">
-    <table role="presentation" style="width:100%;border-collapse:collapse;background-color:#f4f4f4;">
-        <tr>
-            <td align="center" style="padding:20px 0;">
-                <table role="presentation" style="max-width:600px;width:100%;background-color:#ffffff;border-collapse:collapse;box-shadow:0 2px 4px rgba(0,0,0,0.1);">
-                    <tr>
-                        <td style="padding:30px;color:#333333;line-height:1.6;">
-                            {body_content}
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="padding:20px 30px;background-color:#f9f9f9;text-align:center;color:#666666;font-size:12px;border-top:1px solid #eeeeee;">
-                            <p style="margin:0 0 10px 0;">Corvidian Newsletter</p>
-                            <p style="margin:0;"><a href="https://www.corvidian.io" style="color:#007bff;text-decoration:none;">www.corvidian.io</a></p>
-                        </td>
-                    </tr>
-                </table>
-            </td>
-        </tr>
-    </table>
-</body>
-</html>"""
+        email_html = '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>' + escape(self.subject) + '</title></head><body style="margin:0;padding:0;background-color:#f4f4f4;font-family:Arial,sans-serif;"><table role="presentation" style="width:100%;border-collapse:collapse;background-color:#f4f4f4;"><tr><td align="center" style="padding:20px 0;"><table role="presentation" style="max-width:600px;width:100%;background-color:#ffffff;border-collapse:collapse;box-shadow:0 2px 4px rgba(0,0,0,0.1);"><tr><td style="padding:30px;color:#333333;line-height:1.6;">' + body_content + '</td></tr><tr><td style="padding:20px 30px;background-color:#f9f9f9;text-align:center;color:#666666;font-size:12px;border-top:1px solid #eeeeee;"><p style="margin:0 0 10px 0;">Corvidian Newsletter</p><p style="margin:0;"><a href="https://www.corvidian.io" style="color:#007bff;text-decoration:none;">www.corvidian.io</a></p></td></tr></table></td></tr></table></body></html>'
+        
+        print(f"\nHTML built: {len(email_html)} chars")
+        print(f"Has base64: {'YES' if 'data:image' in email_html else 'NO'}\n")
+        
+        return email_html
 
     def build_plain_body(self):
         return strip_tags(self.body or "").strip()
@@ -235,7 +266,7 @@ class NewsletterCampaign(NewsletterContent):
                 message.send()
                 sent_count += 1
             except Exception as e:
-                print(f"Failed to send email to {email}: {e}")
+                print(f"Failed to send to {email}: {e}")
                 continue
 
         self.is_sent = True
