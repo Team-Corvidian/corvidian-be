@@ -8,3 +8,4 @@ djangorestframework
 django-cors-headers
 beautifulsoup4
 gunicorn
+whitenoise
