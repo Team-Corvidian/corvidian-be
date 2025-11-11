@@ -1,31 +1,87 @@
+import threading
+import urllib.parse
+from django.conf import settings
+from django.core.cache import cache
+from django.core.mail import send_mail, EmailMultiAlternatives
+from django.http import Http404
+from rest_framework import status
 from rest_framework import viewsets, generics
 from rest_framework.response import Response
-from rest_framework import status
-from .models import Article, ConsultationLead, NewsletterSubscriber, NewsletterWelcomeMessage
-from .serializers import ArticleSerializer
 from rest_framework.views import APIView
-from django.core.mail import send_mail, EmailMultiAlternatives
-from django.conf import settings
-import urllib.parse
 
+from .models import (
+    ARTICLE_LIST_CACHE_KEY,
+    Article,
+    ConsultationLead,
+    NewsletterSubscriber,
+    NewsletterWelcomeMessage,
+    article_detail_cache_key,
+)
+from .serializers import ArticleDetailSerializer, ArticleListSerializer
+
+
+CACHE_TIMEOUT = getattr(settings, "CACHE_TTL", 300)
+
+
+def run_async(target, *args, **kwargs):
+    threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True).start()
 
 class ArticleViewSet(viewsets.ModelViewSet):
     queryset = Article.objects.all().order_by('-published_at')
-    serializer_class = ArticleSerializer
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return ArticleListSerializer
+        return ArticleDetailSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if getattr(self, 'action', None) == 'list':
+            return queryset.defer('content')
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        cache_key = ARTICLE_LIST_CACHE_KEY if not request.query_params else None
+        if cache_key:
+            cached = cache.get(cache_key)
+            if cached:
+                return Response(cached)
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            if cache_key:
+                cache.set(cache_key, response.data, CACHE_TIMEOUT)
+            return response
+        serializer = self.get_serializer(queryset, many=True)
+        data = serializer.data
+        if cache_key:
+            cache.set(cache_key, data, CACHE_TIMEOUT)
+        return Response(data)
 
 
 class ArticleDetailBySlugView(generics.RetrieveAPIView):
     queryset = Article.objects.all()
-    serializer_class = ArticleSerializer
+    serializer_class = ArticleDetailSerializer
     lookup_field = 'slug'
 
     def get(self, request, *args, **kwargs):
+        slug = kwargs.get(self.lookup_field)
+        cache_key = article_detail_cache_key(slug) if slug else None
+        if cache_key:
+            cached = cache.get(cache_key)
+            if cached:
+                return Response(cached)
         try:
             article = self.get_object()
-            serializer = self.get_serializer(article)
-            return Response(serializer.data)
-        except Article.DoesNotExist:
+        except Http404:
             return Response({"detail": "Article not found"}, status=status.HTTP_404_NOT_FOUND)
+        serializer = self.get_serializer(article)
+        data = serializer.data
+        if cache_key:
+            cache.set(cache_key, data, CACHE_TIMEOUT)
+        return Response(data)
 
 
 class ConsultationSubmitView(APIView):
@@ -63,12 +119,12 @@ class ConsultationSubmitView(APIView):
         receiver_email = settings.CONSULTATION_RECEIVER_EMAIL
         wa_number = settings.CONSULTATION_WHATSAPP
 
-        send_mail(
+        run_async(
+            send_mail,
             subject,
             message,
             settings.DEFAULT_FROM_EMAIL,
             [receiver_email],
-            fail_silently=False,
         )
 
         wa_message = urllib.parse.quote(
@@ -98,12 +154,12 @@ class NewsletterSubscribeView(APIView):
 
         admin_subject = "New Newsletter Subscriber"
         admin_message = f"Email: {email}\nSource: {source}"
-        send_mail(
-            admin_subject, 
-            admin_message, 
-            settings.DEFAULT_FROM_EMAIL, 
-            [settings.CONSULTATION_RECEIVER_EMAIL], 
-            fail_silently=False
+        run_async(
+            send_mail,
+            admin_subject,
+            admin_message,
+            settings.DEFAULT_FROM_EMAIL,
+            [settings.CONSULTATION_RECEIVER_EMAIL],
         )
 
         fallback_subject = "Terima kasih sudah subscribe Corvidian"
@@ -134,14 +190,14 @@ class NewsletterSubscribeView(APIView):
             )
             if html_body:
                 message.attach_alternative(html_body, "text/html")
-            message.send(fail_silently=False)
+            run_async(message.send, fail_silently=False)
         else:
-            send_mail(
+            run_async(
+                send_mail,
                 fallback_subject,
                 fallback_message,
                 settings.DEFAULT_FROM_EMAIL,
                 [email],
-                fail_silently=False,
             )
 
         return Response({"success": True, "created": created}, status=200)
