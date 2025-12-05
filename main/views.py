@@ -117,7 +117,6 @@ class ConsultationSubmitView(APIView):
         )
 
         receiver_email = settings.CONSULTATION_RECEIVER_EMAIL
-        wa_number = settings.CONSULTATION_WHATSAPP
 
         run_async(
             send_mail,
@@ -127,17 +126,25 @@ class ConsultationSubmitView(APIView):
             [receiver_email],
         )
 
-        wa_message = urllib.parse.quote(
-            f"Halo, saya {name} dari {company}. Email: {email}, Telepon: {phone}. Pertanyaan: {question}"
-        )
+        wa_number = (settings.CONSULTATION_WHATSAPP or "").strip()
+        wa_url = None
+        if wa_number:
+            wa_message = urllib.parse.quote(
+                f"Halo, saya {name} dari {company}. Email: {email}, Telepon: {phone}. Pertanyaan: {question}"
+            )
+            wa_url = f"https://wa.me/{wa_number}?text={wa_message}"
 
-        wa_url = f"https://wa.me/{wa_number}?text={wa_message}"
-
-        return Response({
+        response_data = {
             "success": True,
-            "message": "Form submitted. Redirect to WhatsApp.",
-            "whatsapp_url": wa_url,
-        })
+            "message": "Form submitted.",
+        }
+        if wa_url:
+            response_data.update({
+                "message": "Form submitted. Redirect to WhatsApp.",
+                "whatsapp_url": wa_url,
+            })
+
+        return Response(response_data)
 
 
 class NewsletterSubscribeView(APIView):
